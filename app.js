@@ -8,8 +8,8 @@ const app = express();
 app.use(bodyParser.json({ limit: '5mb' }));
 app.use(bodyParser.urlencoded({ limit: '5mb', extended: false }));
 app.use(compression());
-
 app.use(express.static(path.join(__dirname, 'public')));
+app.use('/', require('./routes/index'));
 
 app.set('port', process.env.PORT || 8080);
 
