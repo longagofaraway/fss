@@ -5,7 +5,18 @@
     <meta charset="utf-8">
 
     <script type="text/javascript" src="js/rutoken.js"></script>
-    <script type="text/javascript" src="js/gostCrypto.dist.js"></script>
+    <script type="text/javascript" src="js/src/gostCrypto.js"></script>
+    <script type="text/javascript" src="js/src/gostCoding.js"></script>
+    <script type="text/javascript" src="js/src/gostSecurity.js"></script>
+    <script type="text/javascript" src="js/src/gostASN1.js"></script>
+    <script type="text/javascript" src="js/src/gostCert.js"></script>
+    <script type="text/javascript" src="js/src/gostCipher.js"></script>
+    <script type="text/javascript" src="js/src/gostCMS.js"></script>
+    <script type="text/javascript" src="js/src/gostDigest.js"></script>
+    <script type="text/javascript" src="js/src/gostKeys.js"></script>
+    <script type="text/javascript" src="js/src/gostRandom.js"></script>
+    <script type="text/javascript" src="js/src/gostSign.js"></script>
+
 
     <script>
         function loadScript(src) {
@@ -42,6 +53,16 @@
                 };
                 xhr.send(body);
             });
+        }
+
+        function pad(n, width, z) {
+            return n.length >= width ? n : new Array(width - n.length + 1).join(z) + n;
+        }
+
+        function buf2hex(buffer) {
+            let view = new Uint8Array(buffer);
+            let hex = [...view].map(v => this.pad(v.toString(16), 2, '0'));
+            return hex.join(':');
         }
 
         /*
@@ -89,6 +110,7 @@
         function pluginEncrypt(ctx) {
             return initPlugin()
                 .then(plugin => {
+                    ctx.plugin = plugin;
                     return plugin.enumerateDevices().then(devices => {
                         return plugin.login(0, '12345678')
                             .then(_ => {
@@ -96,6 +118,7 @@
                                     .then(certs => {
                                         // на нашем токене это третий сертификат
                                         let certId = certs[2];
+                                        ctx.certId = certId;
                                         let coding = gostCrypto.coding;
                                         let data = coding.Chars.encode(ctx.data, 'utf-8');
                                         let recipientCert = coding.Base64.encode(ctx.certData);
@@ -108,6 +131,7 @@
                                             let recipient = cmsData.recipientInfos[0];
                                             console.log(recipient.keyEncryptionAlgorithm);
                                             console.log(cmsData.encryptedContentInfo.contentEncryptionAlgorithm);
+                                            console.log(coding.Hex.encode(cmsData.encryptedContentInfo.contentEncryptionAlgorithm.iv));
                                             // извлекаем наш сертификат с токена для помещения в блок X509Certificate
                                             return plugin.getCertificate(0, certId).then(cert => {
                                                 return Promise.resolve({
@@ -130,7 +154,7 @@
                 });
         }
 
-        // шифрование gostCrypto
+        // шифрование gostCrypto CMS
         function jsEncrypt(ctx) {
             let msg = new gostCrypto.cms.EnvelopedDataContentInfo();
             let receiverCert = new gostCrypto.cert.X509(ctx.certData);
@@ -138,15 +162,133 @@
             let pr = msg.encloseContent(ctx.data, 'CP-01').then(_ => {
                 return msg.addRecipient(receiverCert);
             });
-            return pr.then(_ => {                
+            return pr.then(_ => {
                 // получаем зашифрованный ключ и данные из CMS
                 let cmsData = gostCrypto.asn1.ContentInfo.decode(msg.encode('PEM'));
                 let recipient = cmsData.recipientInfos[0];
                 console.log(recipient.keyEncryptionAlgorithm);
                 console.log(cmsData.encryptedContentInfo.contentEncryptionAlgorithm);
+                console.log(gostCrypto.coding.Hex.encode(cmsData.encryptedContentInfo.contentEncryptionAlgorithm.iv));
                 return Promise.resolve({
                     key: gostCrypto.coding.Base64.encode(recipient.encryptedKey),
                     data: gostCrypto.coding.Base64.encode(cmsData.encryptedContentInfo.encryptedContent)
+                });
+            });
+        }
+
+        function getSeed(length) {
+            let seed = new Uint8Array(length);
+            gostCrypto.getRandomValues(seed);
+            return seed.buffer;
+        }
+
+        // Expand javascript object
+        function expand() {
+            let r = {};
+            for (var i = 0, n = arguments.length; i < n; i++) {
+                let item = arguments[i];
+                if (typeof item === 'object')
+                    for (let name in item)
+                        if (item.hasOwnProperty(name))
+                            r[name] = item[name];
+            }
+            return r;
+        }
+
+        // шфирование без CMS
+        function jsEncryptRaw(ctx) {
+            // создаем объет-сертификат из загруженных данных
+            let recipientCert = new gostCrypto.cert.X509(ctx.certData);
+            let encryptionProvider = recipientCert.getProvider();
+            let keyEncryptionAlgorithm = expand(recipientCert.subjectPublicKeyInfo.algorithm);
+            keyEncryptionAlgorithm.ukm = getSeed(8);
+
+            return gostCrypto.subtle.generateKey({ name: 'GOST 28147' }, false, ['encrypt']).then(contentEncryptionKey => {
+                return gostCrypto.subtle.encrypt({ name: 'GOST 28147-89-CFB-CP' }, contentEncryptionKey, ctx.data).then(encryptedData => {
+                    let privateKey, derivation, wrapping;
+
+                    return gostCrypto.subtle.generateKey(keyEncryptionAlgorithm, true, ['deriveKey']).then(keyPair => {
+                        keyEncryptionAlgorithm['public'] = keyPair.publicKey;
+                        return keyPair.privateKey;
+                    })
+                        .then(key => {
+                            privateKey = key;
+                            // Get public key from recipient certificate
+                            return gostCrypto.subtle.importKey('spki', recipientCert.subjectPublicKeyInfo.encode(),
+                                recipientCert.subjectPublicKeyInfo.algorithm, false, ['deriveKey', 'deriveBits']);
+                        })
+                        .then(publicKey => {
+                            derivation = expand(encryptionProvider.agreement,
+                                { sBox: keyEncryptionAlgorithm.sBox, ukm: keyEncryptionAlgorithm.ukm, 'public': publicKey });
+                            wrapping = expand(keyEncryptionAlgorithm.wrapping || encryptionProvider.wrapping,
+                                { ukm: keyEncryptionAlgorithm.ukm });
+                            return gostCrypto.subtle.deriveKey(derivation, privateKey, wrapping, true, ['wrapKey']);
+                        })
+                        .then(wrappingKey => {
+                            // Wrap content encryption key 
+                            keyEncryptionAlgorithm.wrapping = wrapping;
+                            return gostCrypto.subtle.wrapKey('raw', contentEncryptionKey, wrappingKey, wrapping);
+                        })
+                        .then(wrappedKey => {
+                            let encryptedKey = gostCrypto.asn1.GostEncryptedKey(keyEncryptionAlgorithm).encode({
+                                algorithm: keyEncryptionAlgorithm,
+                                sessionEncryptedKey: wrappedKey
+                            });
+                            return Promise.resolve({
+                                key: gostCrypto.coding.Base64.encode(encryptedKey),
+                                data: gostCrypto.coding.Base64.encode(encryptedData)
+                            });
+                        });
+                });
+            });
+        }
+
+        function derive(ctx, keyEncryptionAlgorithm, recipientCert) {
+            return ctx.plugin.getKeyByCertificate(0, ctx.certId)
+                .then(keyId => ctx.plugin.derive(0, keyId, buf2hex(recipientCert.subjectPublicKeyInfo.subjectPublicKey).substr(6), {
+                    ukm: buf2hex(keyEncryptionAlgorithm.ukm)
+                }));
+        }
+
+        // шфирование без CMS нашим закрытым ключом
+        function jsEncryptRawPrivateKey(ctx) {
+            // создаем объет-сертификат из загруженных данных
+            let recipientCert = new gostCrypto.cert.X509(ctx.certData);
+            let encryptionProvider = recipientCert.getProvider();
+            let keyEncryptionAlgorithm = expand(recipientCert.subjectPublicKeyInfo.algorithm);
+            keyEncryptionAlgorithm.ukm = getSeed(8);
+
+            return gostCrypto.subtle.generateKey({ name: 'GOST 28147-89-CFB-CP' }, false, ['encrypt']).then(contentEncryptionKey => {
+                return gostCrypto.subtle.encrypt({ name: 'GOST 28147-89-CFB-CP'}, contentEncryptionKey, ctx.data).then(encryptedData => {
+                    let privateKey, derivation, wrapping;
+
+                    return derive(ctx, keyEncryptionAlgorithm, recipientCert)
+                        .then(wrappingKeyHex => {
+                            return gostCrypto.subtle.importKey('raw', gostCrypto.coding.Hex.decode(wrappingKeyHex), {
+                                id: "id-Gost28147-89-CryptoPro-KeyWrap",
+                                keyWrapping: 'CP',
+                                mode: 'KW',
+                                name: 'GOST 28147',
+                                ukm: keyEncryptionAlgorithm.ukm,
+                                version: 1989
+                            }, false, ['wrapKey']);
+                        }).then(wrappingKey => {
+                            // Wrap content encryption key 
+                            wrapping = expand(keyEncryptionAlgorithm.wrapping || encryptionProvider.wrapping,
+                                { ukm: keyEncryptionAlgorithm.ukm });
+                            keyEncryptionAlgorithm.wrapping = wrapping;
+                            return gostCrypto.subtle.wrapKey('raw', contentEncryptionKey, wrappingKey, wrapping);
+                        })
+                        .then(wrappedKey => {
+                            let encryptedKey = gostCrypto.asn1.GostEncryptedKey(keyEncryptionAlgorithm).encode({
+                                algorithm: keyEncryptionAlgorithm,
+                                sessionEncryptedKey: wrappedKey
+                            });
+                            return Promise.resolve({
+                                key: gostCrypto.coding.Base64.encode(encryptedKey),
+                                data: gostCrypto.coding.Base64.encode(encryptedData)
+                            });
+                        });
                 });
             });
         }
@@ -191,12 +333,12 @@
                     ctx.data = data;
                     // шифруем двумя вариантами. увы, ни один не приводит к безошибочному ответу от ФСС
                     return pluginEncrypt(ctx).then(plugRes => {
-                        return jsEncrypt(ctx).then(jsRes => {
+                        return jsEncryptRawPrivateKey(ctx).then(jsRes => {
                             // посылаем данные на сервер для получения ответа от ФСС
                             return request('POST', '/fss', 'json', {
                                 action: 'getLNData',
                                 // Тут можно заменить plugRes.key и plugRes.data на jsRes.key и jsRes.data для тестирования работы gostCrypto
-                                data: buildXML(plugRes.cert, plugRes.key, plugRes.data)
+                                data: buildXML(plugRes.cert, jsRes.key, jsRes.data)
                             }).then(answer => {
                                 // выводим ответ от сервера в консоль
                                 console.log(answer);
