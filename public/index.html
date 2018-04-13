@@ -106,6 +106,13 @@
             return res && res[1];
         }
 
+        function ivAndData(iv, data) {
+            let res = new Uint8Array(iv.byteLength + data.byteLength);
+            res.set(new Uint8Array(iv), 0);
+            res.set(new Uint8Array(data), iv.byteLength);
+            return res;
+        }
+
         // шифрование плагином
         function pluginEncrypt(ctx) {
             return initPlugin()
@@ -137,8 +144,8 @@
                                                 ctx.senderCert = extractPEMBody(cert).trim();
                                                 return Promise.resolve({
                                                     cert: ctx.senderCert,
-                                                    key: coding.Base64.encode(recipient.encryptedKey),
-                                                    data: coding.Base64.encode(cmsData.encryptedContentInfo.encryptedContent)
+                                                    key: coding.Base64.encode(recipient.encryptedKey),                                                    
+                                                    data: coding.Base64.encode(ivAndData(cmsData.encryptedContentInfo.contentEncryptionAlgorithm.iv, cmsData.encryptedContentInfo.encryptedContent))
                                                 });
                                             });
                                         });
@@ -172,7 +179,7 @@
                 console.log(gostCrypto.coding.Hex.encode(cmsData.encryptedContentInfo.contentEncryptionAlgorithm.iv));
                 return Promise.resolve({
                     key: gostCrypto.coding.Base64.encode(recipient.encryptedKey),
-                    data: gostCrypto.coding.Base64.encode(cmsData.encryptedContentInfo.encryptedContent)
+                    data: gostCrypto.coding.Base64.encode(ivAndData(cmsData.encryptedContentInfo.contentEncryptionAlgorithm.iv, cmsData.encryptedContentInfo.encryptedContent))
                 });
             });
         }
@@ -237,7 +244,7 @@
                             });
                             return Promise.resolve({
                                 key: gostCrypto.coding.Base64.encode(encryptedKey),
-                                data: gostCrypto.coding.Base64.encode(encryptedData)
+                                data: gostCrypto.coding.Base64.encode(ivAndData(new ArrayBuffer(8), encryptedData))
                             });
                         });
                 });
@@ -262,9 +269,10 @@
             let encryptionProvider = recipientCert.getProvider();
             let keyEncryptionAlgorithm = expand(recipientCert.subjectPublicKeyInfo.algorithm);
             keyEncryptionAlgorithm.ukm = getSeed(8);
+            let iv = getSeed(8);
 
-            return gostCrypto.subtle.generateKey({ name: 'GOST 28147-89-CFB-CP' }, false, ['encrypt']).then(contentEncryptionKey => {
-                return gostCrypto.subtle.encrypt({ name: 'GOST 28147-89-CFB-CP' }, contentEncryptionKey, ctx.data).then(encryptedData => {
+            return gostCrypto.subtle.generateKey({ name: 'GOST 28147' }, false, ['encrypt']).then(contentEncryptionKey => {
+                return gostCrypto.subtle.encrypt({ name: 'GOST 28147-89-CFB-CP', iv: iv}, contentEncryptionKey, ctx.data).then(encryptedData => {
                     let wrapping;
 
                     return senderCert.getPublicKey().then(public => {
@@ -293,7 +301,7 @@
                                 });
                                 return Promise.resolve({
                                     key: gostCrypto.coding.Base64.encode(encryptedKey),
-                                    data: gostCrypto.coding.Base64.encode(encryptedData)
+                                    data: gostCrypto.coding.Base64.encode(ivAndData(iv, encryptedData))
                                 });
                             });
                     });
