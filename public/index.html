@@ -134,8 +134,9 @@
                                             console.log(coding.Hex.encode(cmsData.encryptedContentInfo.contentEncryptionAlgorithm.iv));
                                             // извлекаем наш сертификат с токена для помещения в блок X509Certificate
                                             return plugin.getCertificate(0, certId).then(cert => {
+                                                ctx.senderCert = extractPEMBody(cert).trim();
                                                 return Promise.resolve({
-                                                    cert: extractPEMBody(cert).trim(),
+                                                    cert: ctx.senderCert,
                                                     key: coding.Base64.encode(recipient.encryptedKey),
                                                     data: coding.Base64.encode(cmsData.encryptedContentInfo.encryptedContent)
                                                 });
@@ -254,41 +255,45 @@
         function jsEncryptRawPrivateKey(ctx) {
             // создаем объет-сертификат из загруженных данных
             let recipientCert = new gostCrypto.cert.X509(ctx.certData);
+            let senderCert = new gostCrypto.cert.X509(ctx.senderCert);
             let encryptionProvider = recipientCert.getProvider();
             let keyEncryptionAlgorithm = expand(recipientCert.subjectPublicKeyInfo.algorithm);
             keyEncryptionAlgorithm.ukm = getSeed(8);
 
             return gostCrypto.subtle.generateKey({ name: 'GOST 28147-89-CFB-CP' }, false, ['encrypt']).then(contentEncryptionKey => {
-                return gostCrypto.subtle.encrypt({ name: 'GOST 28147-89-CFB-CP'}, contentEncryptionKey, ctx.data).then(encryptedData => {
-                    let privateKey, derivation, wrapping;
+                return gostCrypto.subtle.encrypt({ name: 'GOST 28147-89-CFB-CP' }, contentEncryptionKey, ctx.data).then(encryptedData => {
+                    let wrapping;
 
-                    return derive(ctx, keyEncryptionAlgorithm, recipientCert)
-                        .then(wrappingKeyHex => {
-                            return gostCrypto.subtle.importKey('raw', gostCrypto.coding.Hex.decode(wrappingKeyHex), {
-                                id: "id-Gost28147-89-CryptoPro-KeyWrap",
-                                keyWrapping: 'CP',
-                                mode: 'KW',
-                                name: 'GOST 28147',
-                                ukm: keyEncryptionAlgorithm.ukm,
-                                version: 1989
-                            }, false, ['wrapKey']);
-                        }).then(wrappingKey => {
-                            // Wrap content encryption key 
-                            wrapping = expand(keyEncryptionAlgorithm.wrapping || encryptionProvider.wrapping,
-                                { ukm: keyEncryptionAlgorithm.ukm });
-                            keyEncryptionAlgorithm.wrapping = wrapping;
-                            return gostCrypto.subtle.wrapKey('raw', contentEncryptionKey, wrappingKey, wrapping);
-                        })
-                        .then(wrappedKey => {
-                            let encryptedKey = gostCrypto.asn1.GostEncryptedKey(keyEncryptionAlgorithm).encode({
-                                algorithm: keyEncryptionAlgorithm,
-                                sessionEncryptedKey: wrappedKey
+                    return senderCert.getPublicKey().then(public => {
+                        keyEncryptionAlgorithm['public'] = public;
+                        return derive(ctx, keyEncryptionAlgorithm, recipientCert)
+                            .then(wrappingKeyHex => {
+                                return gostCrypto.subtle.importKey('raw', gostCrypto.coding.Hex.decode(wrappingKeyHex), {
+                                    id: "id-Gost28147-89-CryptoPro-KeyWrap",
+                                    keyWrapping: 'CP',
+                                    mode: 'KW',
+                                    name: 'GOST 28147',
+                                    ukm: keyEncryptionAlgorithm.ukm,
+                                    version: 1989
+                                }, false, ['wrapKey']);
+                            }).then(wrappingKey => {
+                                // Wrap content encryption key 
+                                wrapping = expand(keyEncryptionAlgorithm.wrapping || encryptionProvider.wrapping,
+                                    { ukm: keyEncryptionAlgorithm.ukm });
+                                keyEncryptionAlgorithm.wrapping = wrapping;
+                                return gostCrypto.subtle.wrapKey('raw', contentEncryptionKey, wrappingKey, wrapping);
+                            })
+                            .then(wrappedKey => {
+                                let encryptedKey = gostCrypto.asn1.GostEncryptedKey(keyEncryptionAlgorithm).encode({
+                                    algorithm: keyEncryptionAlgorithm,
+                                    sessionEncryptedKey: wrappedKey
+                                });
+                                return Promise.resolve({
+                                    key: gostCrypto.coding.Base64.encode(encryptedKey),
+                                    data: gostCrypto.coding.Base64.encode(encryptedData)
+                                });
                             });
-                            return Promise.resolve({
-                                key: gostCrypto.coding.Base64.encode(encryptedKey),
-                                data: gostCrypto.coding.Base64.encode(encryptedData)
-                            });
-                        });
+                    });                    
                 });
             });
         }
