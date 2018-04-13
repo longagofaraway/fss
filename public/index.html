@@ -245,10 +245,13 @@
         }
 
         function derive(ctx, keyEncryptionAlgorithm, recipientCert) {
-            return ctx.plugin.getKeyByCertificate(0, ctx.certId)
-                .then(keyId => ctx.plugin.derive(0, keyId, buf2hex(recipientCert.subjectPublicKeyInfo.subjectPublicKey).substr(6), {
-                    ukm: buf2hex(keyEncryptionAlgorithm.ukm)
-                }));
+            return recipientCert.getPublicKey()
+                .then(publicKey => {                    
+                    return ctx.plugin.getKeyByCertificate(0, ctx.certId)
+                        .then(keyId => ctx.plugin.derive(0, keyId, buf2hex(publicKey.buffer), {
+                            ukm: buf2hex(keyEncryptionAlgorithm.ukm)
+                        }));
+                });
         }
 
         // шфирование без CMS нашим закрытым ключом
@@ -293,7 +296,7 @@
                                     data: gostCrypto.coding.Base64.encode(encryptedData)
                                 });
                             });
-                    });                    
+                    });
                 });
             });
         }
