@@ -65,6 +65,42 @@
             return hex.join(':');
         }
 
+        function buildGetLNNumberXML(ctx) {
+            const conanizedBody = `<S:Body xmlns:S="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ds="http://www.w3.org/2000/09/xmldsig#" xmlns:ns1="http://ru/ibs/fss/ln/ws/FileOperationsLn.wsdl" xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd" xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd" wsu:Id="OGRN_${ctx.ogrn}"><ns1:getNewLNNum><ns1:ogrn>${ctx.ogrn}</ns1:ogrn></ns1:getNewLNNum></S:Body>`;
+            // получаем хеш тела
+            return ctx.plugin.digest(ctx.deviceId, ctx.plugin.HASH_TYPE_GOST3411_94, conanizedBody, { useHardwareHash: false })
+                .then(bodyDigest => {
+                    ctx.bodyDigest = gostCrypto.coding.Base64.encode(gostCrypto.coding.Hex.decode(bodyDigest));
+                    const signedInfo = `<SignedInfo xmlns="http://www.w3.org/2000/09/xmldsig#" xmlns:S="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ds="http://www.w3.org/2000/09/xmldsig#" xmlns:ns1="http://ru/ibs/fss/ln/ws/FileOperationsLn.wsdl" xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd" xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd"><CanonicalizationMethod Algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315#WithComments"></CanonicalizationMethod><SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#gostr34102001-gostr3411"></SignatureMethod><Reference URI="#OGRN_${ctx.ogrn}"><DigestMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#gostr3411"></DigestMethod><DigestValue>${ctx.bodyDigest}</DigestValue></Reference></SignedInfo>`;
+                    return ctx.plugin.rawSign(ctx.deviceId, ctx.keyId, signedInfo, {
+                        computeHash: true,
+                        useHardwareHash: false,
+                        hashAlgorithm: ctx.plugin.HASH_TYPE_GOST3411_94
+                    }).then(bodySignature => {
+                        ctx.bodySignature = gostCrypto.coding.Base64.encode(gostCrypto.coding.Hex.decode(bodySignature));
+                        let xml = `<?xml version="1.0" encoding="UTF-8"?>
+<S:Envelope xmlns:S="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ds="http://www.w3.org/2000/09/xmldsig#" xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd" xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd" xmlns:ns1="http://ru/ibs/fss/ln/ws/FileOperationsLn.wsdl">
+	<S:Header>
+		<wsse:Security S:actor="http://eln.fss.ru/actor/mo/1022401590573" xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd">
+            <wsse:BinarySecurityToken EncodingType="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary" ValueType="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-x509-token-profile-1.0#X509v3" wsu:Id="http://eln.fss.ru/actor/mo/1022401590573">${ctx.senderCert}</wsse:BinarySecurityToken>
+            <Signature xmlns="http://www.w3.org/2000/09/xmldsig#">
+                ${signedInfo}
+                <SignatureValue>${ctx.bodySignature}</SignatureValue>
+				<KeyInfo>
+					<wsse:SecurityTokenReference>
+						<wsse:Reference URI="#http://eln.fss.ru/actor/mo/1022401590573" ValueType="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-x509-token-profile-1.0#X509v3"/>
+					</wsse:SecurityTokenReference>
+				</KeyInfo>
+			</Signature>
+		</wsse:Security>
+	</S:Header>
+	${conanizedBody}
+</S:Envelope>`;
+                        return Promise.resolve(xml);
+                    });
+                });
+        }
+
         /*
         Инцициализирует плагин Рутокен
         */
@@ -113,44 +149,34 @@
             return res;
         }
 
-        // шифрование плагином
-        function pluginEncrypt(ctx) {
+        function pluginSign(ctx) {
+            // загружаем плагин
             return initPlugin()
                 .then(plugin => {
                     ctx.plugin = plugin;
                     return plugin.enumerateDevices().then(devices => {
-                        return plugin.login(0, '12345678')
+                        ctx.deviceId = 0;
+                        // входим на устройство
+                        return plugin.login(ctx.deviceId, '12345678')
                             .then(_ => {
-                                return plugin.enumerateCertificates(0, plugin.CERT_CATEGORY_UNSPEC)
+                                // получаем список сертификатов - у нас нужный сертификат первый в категории USER
+                                return plugin.enumerateCertificates(ctx.deviceId, plugin.CERT_CATEGORY_USER)
                                     .then(certs => {
-                                        // на нашем токене это третий сертификат
-                                        let certId = certs[2];
-                                        ctx.certId = certId;
-                                        let coding = gostCrypto.coding;
-                                        let data = coding.Chars.encode(ctx.data, 'utf-8');
-                                        let recipientCert = coding.Base64.encode(ctx.certData);
-                                        return plugin.cmsEncrypt(0, "", [recipientCert], data, {
-                                            base64: false
-                                        }).then(cms => {
-                                            // декодируем CMS
-                                            // получаем зашифрованный ключ и данные из CMS
-                                            let cmsData = gostCrypto.asn1.ContentInfo.decode(cms);
-                                            let recipient = cmsData.recipientInfos[0];
-                                            console.log(recipient.keyEncryptionAlgorithm);
-                                            console.log(cmsData.encryptedContentInfo.contentEncryptionAlgorithm);
-                                            console.log(coding.Hex.encode(cmsData.encryptedContentInfo.contentEncryptionAlgorithm.iv));
-                                            // извлекаем наш сертификат с токена для помещения в блок X509Certificate
-                                            return plugin.getCertificate(0, certId).then(cert => {
-                                                ctx.senderCert = extractPEMBody(cert).trim();
-                                                return Promise.resolve({
-                                                    cert: ctx.senderCert,
-                                                    key: coding.Base64.encode(recipient.encryptedKey),                                                    
-                                                    data: coding.Base64.encode(ivAndData(cmsData.encryptedContentInfo.contentEncryptionAlgorithm.iv, cmsData.encryptedContentInfo.encryptedContent))
+                                        ctx.certId = certs[0];
+                                        // plugin.parseCertificate(ctx.deviceId, ctx.certId).then(data => console.log(data));
+                                        // получаем индентификатор ключа, привязанного к сертификату
+                                        return plugin.getKeyByCertificate(ctx.deviceId, ctx.certId)
+                                            .then(keyId => {
+                                                ctx.keyId = keyId;
+                                                // сам сертификат нам тоже нужен - он передается внутри XML
+                                                return plugin.getCertificate(ctx.deviceId, ctx.certId).then(cert => {
+                                                    ctx.senderCert = extractPEMBody(cert).trim();
+                                                    // формируем XML
+                                                    return buildGetLNNumberXML(ctx);
                                                 });
                                             });
-                                        });
-                                    });
-                            });
+                                    })
+                            })
                     });
                 })
                 .catch(e => {
@@ -162,27 +188,29 @@
                 });
         }
 
-        // шифрование gostCrypto CMS
-        function jsEncrypt(ctx) {
-            let msg = new gostCrypto.cms.EnvelopedDataContentInfo();
-            let receiverCert = new gostCrypto.cert.X509(ctx.certData);
-            // формируем CMS - указываем данные и сертификат получателя
-            let pr = msg.encloseContent(ctx.data, 'CP-01').then(_ => {
-                return msg.addRecipient(receiverCert);
-            });
-            return pr.then(_ => {
+        // шифрование плагином
+        function pluginEncrypt(ctx) {
+            // в этом месте уже плугин должен быть подключен, сертификат получен
+            let coding = gostCrypto.coding;
+            let recipientCert = coding.Base64.encode(ctx.certData);
+            return ctx.plugin.cmsEncrypt(0, "", [recipientCert], ctx.data, {
+                base64: false
+            }).then(cms => {
+                // декодируем CMS
                 // получаем зашифрованный ключ и данные из CMS
-                let cmsData = gostCrypto.asn1.ContentInfo.decode(msg.encode('PEM'));
+                let cmsData = gostCrypto.asn1.ContentInfo.decode(cms);
                 let recipient = cmsData.recipientInfos[0];
                 console.log(recipient.keyEncryptionAlgorithm);
                 console.log(cmsData.encryptedContentInfo.contentEncryptionAlgorithm);
-                console.log(gostCrypto.coding.Hex.encode(cmsData.encryptedContentInfo.contentEncryptionAlgorithm.iv));
+                console.log(coding.Hex.encode(cmsData.encryptedContentInfo.contentEncryptionAlgorithm.iv));
                 return Promise.resolve({
-                    key: gostCrypto.coding.Base64.encode(recipient.encryptedKey),
-                    data: gostCrypto.coding.Base64.encode(ivAndData(cmsData.encryptedContentInfo.contentEncryptionAlgorithm.iv, cmsData.encryptedContentInfo.encryptedContent))
+                    cert: ctx.senderCert,
+                    key: coding.Base64.encode(recipient.encryptedKey),
+                    data: coding.Base64.encode(ivAndData(cmsData.encryptedContentInfo.contentEncryptionAlgorithm.iv, cmsData.encryptedContentInfo.encryptedContent))
                 });
             });
         }
+
 
         function getSeed(length) {
             let seed = new Uint8Array(length);
@@ -203,61 +231,14 @@
             return r;
         }
 
-        // шфирование без CMS
-        function jsEncryptRaw(ctx) {
-            // создаем объет-сертификат из загруженных данных
-            let recipientCert = new gostCrypto.cert.X509(ctx.certData);
-            let encryptionProvider = recipientCert.getProvider();
-            let keyEncryptionAlgorithm = expand(recipientCert.subjectPublicKeyInfo.algorithm);
-            keyEncryptionAlgorithm.ukm = getSeed(8);
-
-            return gostCrypto.subtle.generateKey({ name: 'GOST 28147' }, false, ['encrypt']).then(contentEncryptionKey => {
-                return gostCrypto.subtle.encrypt({ name: 'GOST 28147-89-CFB-CP' }, contentEncryptionKey, ctx.data).then(encryptedData => {
-                    let privateKey, derivation, wrapping;
-
-                    return gostCrypto.subtle.generateKey(keyEncryptionAlgorithm, true, ['deriveKey']).then(keyPair => {
-                        keyEncryptionAlgorithm['public'] = keyPair.publicKey;
-                        return keyPair.privateKey;
-                    })
-                        .then(key => {
-                            privateKey = key;
-                            // Get public key from recipient certificate
-                            return gostCrypto.subtle.importKey('spki', recipientCert.subjectPublicKeyInfo.encode(),
-                                recipientCert.subjectPublicKeyInfo.algorithm, false, ['deriveKey', 'deriveBits']);
-                        })
-                        .then(publicKey => {
-                            derivation = expand(encryptionProvider.agreement,
-                                { sBox: keyEncryptionAlgorithm.sBox, ukm: keyEncryptionAlgorithm.ukm, 'public': publicKey });
-                            wrapping = expand(keyEncryptionAlgorithm.wrapping || encryptionProvider.wrapping,
-                                { ukm: keyEncryptionAlgorithm.ukm });
-                            return gostCrypto.subtle.deriveKey(derivation, privateKey, wrapping, true, ['wrapKey']);
-                        })
-                        .then(wrappingKey => {
-                            // Wrap content encryption key 
-                            keyEncryptionAlgorithm.wrapping = wrapping;
-                            return gostCrypto.subtle.wrapKey('raw', contentEncryptionKey, wrappingKey, wrapping);
-                        })
-                        .then(wrappedKey => {
-                            let encryptedKey = gostCrypto.asn1.GostEncryptedKey(keyEncryptionAlgorithm).encode({
-                                algorithm: keyEncryptionAlgorithm,
-                                sessionEncryptedKey: wrappedKey
-                            });
-                            return Promise.resolve({
-                                key: gostCrypto.coding.Base64.encode(encryptedKey),
-                                data: gostCrypto.coding.Base64.encode(ivAndData(new ArrayBuffer(8), encryptedData))
-                            });
-                        });
-                });
-            });
-        }
-
+        // деривация ключа
         function derive(ctx, keyEncryptionAlgorithm, recipientCert) {
             return recipientCert.getPublicKey()
-                .then(publicKey => {                    
-                    return ctx.plugin.getKeyByCertificate(0, ctx.certId)
-                        .then(keyId => ctx.plugin.derive(0, keyId, buf2hex(publicKey.buffer), {
-                            ukm: buf2hex(keyEncryptionAlgorithm.ukm)
-                        }));
+                .then(publicKey => {
+                    // посылаем публичный ключ ФСС и идентификатор нашего закрытого ключа
+                    return ctx.plugin.derive(ctx.deviceId, ctx.keyId, buf2hex(publicKey.buffer), {
+                        ukm: buf2hex(keyEncryptionAlgorithm.ukm)
+                    });
                 });
         }
 
@@ -270,9 +251,10 @@
             let keyEncryptionAlgorithm = expand(recipientCert.subjectPublicKeyInfo.algorithm);
             keyEncryptionAlgorithm.ukm = getSeed(8);
             let iv = getSeed(8);
+            let data = gostCrypto.coding.Chars.decode(ctx.data, 'utf-8');
 
             return gostCrypto.subtle.generateKey({ name: 'GOST 28147' }, false, ['encrypt']).then(contentEncryptionKey => {
-                return gostCrypto.subtle.encrypt({ name: 'GOST 28147-89-CFB-CP', iv: iv}, contentEncryptionKey, ctx.data).then(encryptedData => {
+                return gostCrypto.subtle.encrypt({ name: 'GOST 28147-89-CFB-CP', iv: iv }, contentEncryptionKey, data).then(encryptedData => {
                     let wrapping;
 
                     return senderCert.getPublicKey().then(public => {
@@ -310,7 +292,7 @@
         }
 
         // построить XML по сертификату, ключу и данным
-        function buildXML(x509Certificate, encryptedKey, encyptedData) {
+        function buildEncriptedXML(x509Certificate, encryptedKey, encyptedData) {
             return `<?xml version="1.0" encoding="utf-8"?>
 <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">
     <soapenv:Header/>
@@ -338,27 +320,52 @@
 </soapenv:Envelope>`;
         }
 
+        function putData(id, data) {
+            document.getElementById(id).value = data;
+        }
+
+        // Запуск процесса подписания и шифрования
         function process() {
             // запрашиваем сертификат с сервера
-            return request('GET', 'FSS_TEST_CERT_2017.der').then(certData => {
+            return request('GET', 'FSS_TEST_CERT_2019.cer').then(certData => {
+
+                // контекст
                 let ctx = {
-                    certData: certData
+                    certData: certData,     // данные сертификата ФСС
+                    ogrn: '1022402135260',  // тестовый ОГРН
+                    crypt: true             // требуется ли шифрование
                 }
-                // запрашиваем XML для шифрования
-                return request('GET', 'getLNData.xml').then(data => {
-                    ctx.data = data;
-                    // шифруем двумя вариантами. увы, ни один не приводит к безошибочному ответу от ФСС
-                    return pluginEncrypt(ctx).then(plugRes => {
-                        return jsEncryptRawPrivateKey(ctx).then(jsRes => {
-                            // посылаем данные на сервер для получения ответа от ФСС
-                            return request('POST', '/fss', 'json', {
-                                action: 'getLNData',
-                                // Тут можно заменить plugRes.key и plugRes.data на jsRes.key и jsRes.data для тестирования работы gostCrypto
-                                data: buildXML(plugRes.cert, jsRes.key, jsRes.data)
-                            }).then(answer => {
-                                // выводим ответ от сервера в консоль
-                                console.log(answer);
-                            });
+
+                // формируем XML получения нового номера больничного
+                return pluginSign(ctx).then(xml => {
+                    putData('signedXML', xml);
+                    // если проверяем только подписание, то всё готово к отправке
+                    if (!ctx.crypt) {
+                        // отправляем запрос на сервер ФСС
+                        return request('POST', '/fss', 'json', {
+                            action: 'getNewLNNum',
+                            crypt: false,
+                            data: xml
+                        }).then(answer => {
+                            // выводим ответ от сервера
+                            putData('answer', JSON.stringify(answer));
+                        });
+                    }
+
+                    ctx.data = xml;
+
+                    // если мы дошли до сюда, то значит нам надо шифрование
+                    return jsEncryptRawPrivateKey(ctx).then(encriptedRes => {
+                        // посылаем данные на сервер для получения ответа от ФСС
+                        let cryptedXML = buildEncriptedXML(ctx.senderCert, encriptedRes.key, encriptedRes.data);
+                        putData('cryptedXML', cryptedXML);
+                        return request('POST', '/fss', 'json', {
+                            action: 'getNewLNNum',
+                            crypt: true,
+                            data: cryptedXML
+                        }).then(answer => {
+                            // выводим ответ от сервера в консоль
+                            putData('answer', JSON.stringify(answer));
                         });
                     });
                 });
@@ -369,7 +376,9 @@
 </head>
 
 <body onload="process();">
-
+    <textarea readonly="true" id="signedXML" style='width: 30%; height: 95vh'>Тут будет подписанный XML</textarea>
+    <textarea readonly="true" id="cryptedXML" style='width: 30%; height: 95vh'>Тут будет зашифрованный XML</textarea>
+    <textarea readonly="true" id="answer" style='width: 30%; height: 95vh'>Тут будет ответ сервера ФСС</textarea>
 </body>
 
 </html>

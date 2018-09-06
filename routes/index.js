@@ -4,12 +4,13 @@ const request = require('request-promise');
 const fs = require('mz/fs');
 
 router.post('/fss', function (req, res) {
+    let uri = req.body.crypt ? 'https://docs-test.fss.ru/WSLnCryptoV11/FileOperationsLnPort' : 'https://docs-test.fss.ru/WSLnV11/FileOperationsLnPort';
     fs.writeFile('last.xml', req.body.data)
         .then(_ => {
             let soapAction = 'http://ru/ibs/fss/ln/ws/FileOperationsLn.wsdl/' + req.body.action;
             return request({
                 method: 'POST',
-                uri: 'https://docs-test.fss.ru/WSLnCryptoV11/FileOperationsLnPort',
+                uri: uri,
                 insecure: true,
                 strictSSL: false,
                 headers: {
