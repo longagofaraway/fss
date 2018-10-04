@@ -1807,6 +1807,39 @@
     } // </editor-fold>
 
     /**
+     * CryptoPro key meshing which happens if you call CryptEncrypt in mode CRYPT_MODE_CBC (not CRYPT_MODE_CBCRFC4357)
+     * new IV is ignored
+     * 
+     * @memberOf GostCipher
+     * @method keyMeshing
+     * @instance
+     * @private
+     * @param {(Uint8Array|CryptoOperationData)} k 8x8 bit key 
+     * @param {Uint8Array} s 8x8 bit sync (iv)
+     * @param {Integer} i block index
+     * @param {Int32Array} key 8x32 bit key schedule 
+     * @param {boolean} e true - decrypt
+     * @returns CryptoOperationData next 8x8 bit key
+     */
+    function keyMeshingCPCBC(k, s, i, key, e) // <editor-fold defaultstate="collapsed">
+    {
+        if ((i + 1) * this.blockSize % 1024 === 0) { // every 1024 octets
+            // CryptEncrypt in CRYPT_MODE_CBC with CryptoPro doesn't use new IV
+            // so we'll ignore it
+            stmp = new Uint8Array(s);
+
+            // K[i+1] = decryptECB (K[i], C);
+            k = decryptECB.call(this, k, C);
+            // IV0[i+1] = encryptECB (K[i+1],IVn[i])
+            stmp.set(new Uint8Array(encryptECB.call(this, k, stmp)));
+            // restore key schedule
+            key.set(this.keySchedule(k, e));
+        }
+        return k;
+    } // </editor-fold>
+
+
+    /**
      *  Null Key Meshing in according to rfc4357 2.3.1
      * 
      * @memberOf GostCipher
@@ -2168,6 +2201,9 @@
                 switch (algorithm.keyMeshing) {
                     case 'CP':
                         this.keyMeshing = keyMeshingCP;
+                        break;
+                    case 'CPCBC':
+                        this.keyMeshing = keyMeshingCPCBC;
                         break;
                     default:
                         this.keyMeshing = noKeyMeshing;

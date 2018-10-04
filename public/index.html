@@ -78,8 +78,7 @@
                         hashAlgorithm: ctx.plugin.HASH_TYPE_GOST3411_94
                     }).then(bodySignature => {
                         ctx.bodySignature = gostCrypto.coding.Base64.encode(gostCrypto.coding.Hex.decode(bodySignature));
-                        let xml = `<?xml version="1.0" encoding="UTF-8"?>
-<S:Envelope xmlns:S="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ds="http://www.w3.org/2000/09/xmldsig#" xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd" xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd" xmlns:ns1="http://ru/ibs/fss/ln/ws/FileOperationsLn.wsdl">
+                        let xml = `<S:Envelope xmlns:S="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ds="http://www.w3.org/2000/09/xmldsig#" xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd" xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd" xmlns:ns1="http://ru/ibs/fss/ln/ws/FileOperationsLn.wsdl">
 	<S:Header>
 		<wsse:Security S:actor="http://eln.fss.ru/actor/mo/1022401590573" xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd">
             <wsse:BinarySecurityToken EncodingType="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary" ValueType="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-x509-token-profile-1.0#X509v3" wsu:Id="http://eln.fss.ru/actor/mo/1022401590573">${ctx.senderCert}</wsse:BinarySecurityToken>
@@ -253,8 +252,23 @@
             let iv = getSeed(8);
             let data = gostCrypto.coding.Chars.decode(ctx.data, 'utf-8');
 
+            // padding data manually (ISO10126)
+            let data_view = new Uint8Array(data);
+            let padnum = data_view.length % 8;
+            if (padnum > 0) {
+                let data_tmp = new ArrayBuffer(data_view.length + (8 - padnum));
+                let dtv = new Uint8Array(data_tmp);
+
+                for(let i = 0; i < data_view.length; ++i)
+                    dtv[i] = data_view[i];
+                for(let i = 0; i < (8-padnum); ++i)
+                    dtv[data_view.length+i] = (8-padnum);
+                data = dtv.buffer;
+            }
+
             return gostCrypto.subtle.generateKey({ name: 'GOST 28147' }, false, ['encrypt']).then(contentEncryptionKey => {
-                return gostCrypto.subtle.encrypt({ name: 'GOST 28147-89-CFB-CP', iv: iv }, contentEncryptionKey, data).then(encryptedData => {
+                return gostCrypto.subtle.encrypt({ name: 'GOST 28147-CBC', 
+                    iv: iv, keyMeshing: 'CPCBC' }, contentEncryptionKey, data).then(encryptedData => {
                     let wrapping;
 
                     return senderCert.getPublicKey().then(public => {
@@ -262,7 +276,7 @@
                         return derive(ctx, keyEncryptionAlgorithm, recipientCert)
                             .then(wrappingKeyHex => {
                                 return gostCrypto.subtle.importKey('raw', gostCrypto.coding.Hex.decode(wrappingKeyHex), {
-                                    id: "id-Gost28147-89-CryptoPro-KeyWrap",
+                                    // id doesn't really do anything here
                                     keyWrapping: 'CP',
                                     mode: 'KW',
                                     name: 'GOST 28147',
