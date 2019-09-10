@@ -66,37 +66,34 @@
         }
 
         function buildGetLNNumberXML(ctx) {
-            const conanizedBody = `<S:Body xmlns:S="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ds="http://www.w3.org/2000/09/xmldsig#" xmlns:ns1="http://ru/ibs/fss/ln/ws/FileOperationsLn.wsdl" xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd" xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd" wsu:Id="OGRN_${ctx.ogrn}"><ns1:getNewLNNum><ns1:ogrn>${ctx.ogrn}</ns1:ogrn></ns1:getNewLNNum></S:Body>`;
+            //заранее канонизированный подписываемый узел
+            const conanizedBody = `<soapenv:Body xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd" wsu:Id="OGRN_1132130001827"><eln:getNewLNNum xmlns:eln="http://ru/ibs/fss/ln/ws/FileOperationsLn.wsdl"><eln:ogrn>1132130001827</eln:ogrn></eln:getNewLNNum></soapenv:Body>`;
             // получаем хеш тела
-            return ctx.plugin.digest(ctx.deviceId, ctx.plugin.HASH_TYPE_GOST3411_94, conanizedBody, { useHardwareHash: false })
+            return ctx.plugin.digest(ctx.deviceId, ctx.plugin.HASH_TYPE_GOST3411_12_256, conanizedBody, { useHardwareHash: false })
                 .then(bodyDigest => {
                     ctx.bodyDigest = gostCrypto.coding.Base64.encode(gostCrypto.coding.Hex.decode(bodyDigest));
-                    const signedInfo = `<SignedInfo xmlns="http://www.w3.org/2000/09/xmldsig#" xmlns:S="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ds="http://www.w3.org/2000/09/xmldsig#" xmlns:ns1="http://ru/ibs/fss/ln/ws/FileOperationsLn.wsdl" xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd" xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd"><CanonicalizationMethod Algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315#WithComments"></CanonicalizationMethod><SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#gostr34102001-gostr3411"></SignatureMethod><Reference URI="#OGRN_${ctx.ogrn}"><DigestMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#gostr3411"></DigestMethod><DigestValue>${ctx.bodyDigest}</DigestValue></Reference></SignedInfo>`;
-                    return ctx.plugin.rawSign(ctx.deviceId, ctx.keyId, signedInfo, {
-                        computeHash: true,
-                        useHardwareHash: false,
-                        hashAlgorithm: ctx.plugin.HASH_TYPE_GOST3411_94
+                    //Вставляем вычисленный хеш подписываемого тела в заранее канонизированный узел SignedInfo
+                    const signedInfo = `<SignedInfo xmlns="http://www.w3.org/2000/09/xmldsig#"><CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"></CanonicalizationMethod><SignatureMethod Algorithm="urn:ietf:params:xml:ns:cpxmlsec:algorithms:gostr34102012-gostr34112012-256"></SignatureMethod><Reference URI="#OGRN_1132130001827"><Transforms><Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"></Transform></Transforms><DigestMethod Algorithm="urn:ietf:params:xml:ns:cpxmlsec:algorithms:gostr34112012-256"></DigestMethod><DigestValue>${ctx.bodyDigest}</DigestValue></Reference></SignedInfo>`;
+                    //Теперь вычисляем хеш от всего узла SignedInfo
+                    return ctx.plugin.digest(ctx.deviceId, ctx.plugin.HASH_TYPE_GOST3411_12_256, signedInfo, { useHardwareHash: false })
+                    .then(infoDigest => {
+                        //подписываем полученный хеш по ключу (сырая подпись)
+                    return ctx.plugin.rawSign(ctx.deviceId, ctx.keyId, infoDigest,{
+                        computeHash: false,
+                        useHardwareHash: false
                     }).then(bodySignature => {
                         ctx.bodySignature = gostCrypto.coding.Base64.encode(gostCrypto.coding.Hex.decode(bodySignature));
-                        let xml = `<S:Envelope xmlns:S="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ds="http://www.w3.org/2000/09/xmldsig#" xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd" xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd" xmlns:ns1="http://ru/ibs/fss/ln/ws/FileOperationsLn.wsdl">
-	<S:Header>
-		<wsse:Security S:actor="http://eln.fss.ru/actor/mo/1022401590573" xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd">
-            <wsse:BinarySecurityToken EncodingType="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary" ValueType="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-x509-token-profile-1.0#X509v3" wsu:Id="http://eln.fss.ru/actor/mo/1022401590573">${ctx.senderCert}</wsse:BinarySecurityToken>
-            <Signature xmlns="http://www.w3.org/2000/09/xmldsig#">
-                ${signedInfo}
-                <SignatureValue>${ctx.bodySignature}</SignatureValue>
-				<KeyInfo>
-					<wsse:SecurityTokenReference>
-						<wsse:Reference URI="#http://eln.fss.ru/actor/mo/1022401590573" ValueType="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-x509-token-profile-1.0#X509v3"/>
-					</wsse:SecurityTokenReference>
-				</KeyInfo>
-			</Signature>
-		</wsse:Security>
-	</S:Header>
-	${conanizedBody}
-</S:Envelope>`;
+                        let xml = 
+`<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ds="http://www.w3.org/2000/09/xmldsig#" xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd" xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:eln="http://ru/ibs/fss/ln/ws/FileOperationsLn.wsdl">
+    <soapenv:Header>
+        <wsse:Security soapenv:actor="http://eln.fss.ru/actor/mo/1132130001827">
+        <Signature xmlns="http://www.w3.org/2000/09/xmldsig#">${signedInfo}<SignatureValue>${ctx.bodySignature}</SignatureValue><ds:KeyInfo><wsse:SecurityTokenReference><wsse:Reference URI="#http://eln.fss.ru/actor/mo/1132130001827" /></wsse:SecurityTokenReference></ds:KeyInfo></Signature><wsse:BinarySecurityToken EncodingType="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary" ValueType="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-x509-token-profile-1.0#X509v3" wsu:Id="http://eln.fss.ru/actor/mo/1132130001827">${ctx.senderCert}</wsse:BinarySecurityToken>
+        </wsse:Security>
+    </soapenv:Header>${conanizedBody}</soapenv:Envelope>`;
                         return Promise.resolve(xml);
-                    });
+                    }, error => {Console.info('Ошибка:' + rutoken.errorDescription[error.message]);}
+                    );
+                });
                 });
         }
 
@@ -341,13 +338,13 @@
         // Запуск процесса подписания и шифрования
         function process() {
             // запрашиваем сертификат с сервера
-            return request('GET', 'FSS_TEST_CERT_2020.cer').then(certData => {
+            return request('GET', 'FSS_TEST_CERT_2019_34.10-2012.cer').then(certData => {
 
                 // контекст
                 let ctx = {
                     certData: certData,     // данные сертификата ФСС
                     ogrn: '1022402135260',  // тестовый ОГРН
-                    crypt: true             // требуется ли шифрование
+                    crypt: false            // требуется ли шифрование
                 }
 
                 // формируем XML получения нового номера больничного
