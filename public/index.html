@@ -244,6 +244,7 @@
             let recipientCert = new gostCrypto.cert.X509(ctx.certData);
             let senderCert = new gostCrypto.cert.X509(ctx.senderCert);
             let encryptionProvider = recipientCert.getProvider();
+            encryptionProvider.wrapping.sBox = "E-Z";
             let keyEncryptionAlgorithm = expand(recipientCert.subjectPublicKeyInfo.algorithm);
             keyEncryptionAlgorithm.ukm = getSeed(8);
             let iv = getSeed(8);
@@ -263,7 +264,7 @@
                 data = dtv.buffer;
             }
 
-            return gostCrypto.subtle.generateKey({ name: 'GOST 28147' }, false, ['encrypt']).then(contentEncryptionKey => {
+            return gostCrypto.subtle.generateKey({ name: 'GOST 28147', sBox : "E-Z" }, false, ['encrypt']).then(contentEncryptionKey => {
                 return gostCrypto.subtle.encrypt({ name: 'GOST 28147-CBC', 
                     iv: iv, keyMeshing: 'CPCBC' }, contentEncryptionKey, data).then(encryptedData => {
                     let wrapping;
@@ -278,7 +279,8 @@
                                     mode: 'KW',
                                     name: 'GOST 28147',
                                     ukm: keyEncryptionAlgorithm.ukm,
-                                    version: 1989
+                                    version: 1989,
+                                    sBox : "E-Z"
                                 }, false, ['wrapKey']);
                             }).then(wrappingKey => {
                                 // Wrap content encryption key 
@@ -338,13 +340,13 @@
         // Запуск процесса подписания и шифрования
         function process() {
             // запрашиваем сертификат с сервера
-            return request('GET', 'FSS_TEST_CERT_2019_34.10-2012.cer').then(certData => {
+            return request('GET', 'FSS_TEST_CERT_2020_GOST2012.cer').then(certData => {
 
                 // контекст
                 let ctx = {
                     certData: certData,     // данные сертификата ФСС
                     ogrn: '1022402135260',  // тестовый ОГРН
-                    crypt: false            // требуется ли шифрование
+                    crypt: true            // требуется ли шифрование
                 }
 
                 // формируем XML получения нового номера больничного
@@ -355,7 +357,7 @@
                         // отправляем запрос на сервер ФСС
                         return request('POST', '/fss', 'json', {
                             action: 'getNewLNNum',
-                            crypt: false,
+                            crypt: true,
                             data: xml
                         }).then(answer => {
                             // выводим ответ от сервера
